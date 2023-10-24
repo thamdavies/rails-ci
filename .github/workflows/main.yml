@@ -1,0 +1,176 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - "tetstsstt"
+
+permissions:
+  checks: write
+  pull-requests: write
+  contents: write
+
+jobs:
+  reviews:
+    name: Review codes
+    runs-on: ubuntu-latest
+
+    env:
+      RAILS_ENV: test
+      TZ: /usr/share/zoneinfo/Asia/Tokyo
+      BUNDLE_JOBS: 4
+      BUNDLE_RETRY: 3
+      BUNDLE_PATH: vendor/bundle
+      GEM_PATH: vendor/bundle
+      RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
+      DISABLE_BOOTSNAP: true
+      DISABLE_BOOTSNAP_LOAD_PATH_CACHE: true
+    services:
+      postgres:
+        image: postgres:13.4
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: rails_ci
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:latest
+        ports:
+          - 6379:6379
+      mongodb:
+        image: mongo:3.6
+        ports:
+          - 27017:27017
+
+    steps:
+      - name: Clone source from Github
+        uses: actions/checkout@v4
+
+      - name: Get submodule commit
+        run: |
+          echo "SUBMODULE_COMMIT=$(git rev-parse HEAD:shared)" > $GITHUB_ENV
+          echo $SUBMODULE_COMMIT
+
+      - name: Sync submodules
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SUBMODULE_COMMIT }}
+          repository: miliad-hinodelabo/qlear-v2-shared
+          path: shared
+          token: ${{ secrets.TOKEN }}
+          submodules: recursive
+
+      - name: Set up Ruby and install gems
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.2.1
+          bundler-cache: true
+
+      - name: Retrieve and store changed ruby files
+        id: changed-files
+        run: echo "CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRTUXB FETCH_HEAD | grep -E "(\.rb$)" | tr '\n' ' ')" >> $GITHUB_OUTPUT
+
+      - name: Linting the following files
+        env:
+          CHANGED_FILES: ${{ steps.changed-files.outputs.CHANGED_FILES }}
+        run: echo $CHANGED_FILES
+
+      - name: Run code reviews with reviewdog
+        uses: reviewdog/action-rubocop@v2
+        with:
+          rubocop_flags: ${{ steps.changed-files.outputs.CHANGED_FILES }}
+          rubocop_version: gemfile
+          rubocop_extensions: rubocop-rails:gemfile rubocop-rspec:gemfile rubocop-performance:gemfile
+          reporter: github-pr-review
+          use_bundler: true
+          skip_install: true
+          fail_on_error: true
+
+      - name: Run rails best practices
+        uses: blooper05/action-rails_best_practices@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          reporter: github-pr-review
+          level: warning # GitHub Status Check won't become failure with warning.
+
+      - name: Run security vulnerability scanner
+        uses: reviewdog/action-brakeman@v2
+        with:
+          brakeman_version: gemfile
+          reporter: github-pr-review
+
+  tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+
+    env:
+      RAILS_ENV: test
+      TZ: /usr/share/zoneinfo/Asia/Tokyo
+      BUNDLE_JOBS: 4
+      BUNDLE_RETRY: 3
+      BUNDLE_PATH: vendor/bundle
+      GEM_PATH: vendor/bundle
+      RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
+      DISABLE_BOOTSNAP: true
+      DISABLE_BOOTSNAP_LOAD_PATH_CACHE: true
+    services:
+      postgres:
+        image: postgres:13.4
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_DB: rails_ci
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+      redis:
+        image: redis:latest
+        ports:
+          - 6379:6379
+      mongodb:
+        image: mongo:3.6
+        ports:
+          - 27017:27017
+
+    steps:
+      - name: Clone source from Github
+        uses: actions/checkout@v4
+
+      - name: Get submodule commit
+        run: |
+          echo "SUBMODULE_COMMIT=$(git rev-parse HEAD:shared)" > $GITHUB_ENV
+          echo $SUBMODULE_COMMIT
+
+      - name: Sync submodules
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SUBMODULE_COMMIT }}
+          repository: miliad-hinodelabo/qlear-v2-shared
+          path: shared
+          token: ${{ secrets.TOKEN }}
+          submodules: recursive
+
+      - name: Set up Ruby and install gems
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.2.1
+          bundler-cache: true
+
+      - name: Setup DBs
+        run: |
+          mv config/database.ci.yml config/database.yml
+          mv config/mongoid.ci.yml config/mongoid.yml
+          bundle exec rails db:schema:load:primary --trace
+          bundle exec rails db:create:universal
+          bundle exec rails db:schema:load:universal --trace
+
+      - name: Run tests
+        run: bundle exec rspec
+
+      - name: Report code coverage
+        uses: joshmfrankel/simplecov-check-action@main
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          minimum_file_coverage: 10 # Change this to meet your standard
